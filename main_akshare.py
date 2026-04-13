@@ -1,13 +1,11 @@
 import akshare as ak
 import pandas as pd
-print('AkShare 版本:', ak.__version__)
-print('Pandas 版本:', pd.__version__)
 import yfinance as yf
-import akshare as ak
-import pandas as pd
 import time
 from datetime import datetime
 
+print('AkShare 版本:', ak.__version__)
+print('Pandas 版本:', pd.__version__)
 def get_stock_history_safe(ticker="0700.HK", period="1y", max_retries=3):
     """
     安全拉取港股历史数据：
