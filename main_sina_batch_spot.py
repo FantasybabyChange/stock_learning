@@ -3,8 +3,11 @@
 
 - A 股：sh/sz + 6 位，如 sh600519、sz000001
 - 港股：hk + 5 位，如 hk00700（腾讯）；支持 00700.HK、hk00700、1810、01810 等写法
+- 主要指数：上证 sh000001、深指 sz399001、恒生科技 hkHSTECH；也可用别名「上证」「深指」「恒生科技」等
 
-控制台输出：每行 3 只股票。直接运行本文件时默认每 3 分钟拉取一轮（`_POLL_INTERVAL_SEC`）。
+控制台输出：每行 3 条（股/指数混排）。[指]=大盘指数，[H]=港股。直接运行本文件时默认每 3 分钟拉取一轮（`_POLL_INTERVAL_SEC`）。
+
+自选列表：优先读取与本脚本同目录下的 `watchlist.txt`（UTF-8，逗号分隔，可多行；`#` 开头的片段忽略）。读不到或解析为空时使用内置 `DEFAULT_WATCHLIST`。
 
 依赖：requests（随 akshare 环境一般已有）。
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -27,16 +31,77 @@ _SINA_HEADERS = {
 }
 _POLL_INTERVAL_SEC = 180
 _BATCH_SIZE = 40
-_LINE_RE = re.compile(r'var hq_str_((?:sh|sz)\d{6}|hk\d{5})="([^"]*)"')
+# 港股除5 位数字代码外，还有字母类代码（如恒生科技 hkHSTECH）
+_LINE_RE = re.compile(r'var hq_str_((?:sh|sz)\d{6}|hk\d{5}|hk[A-Z][A-Z0-9]*)="([^"]*)"')
+
+# 常用指数/别名 → 新浪 hq 代码（与个股同一接口）
+_SINA_HQ_ALIASES: dict[str, str] = {
+    "上证": "sh000001",
+    "上证指数": "sh000001",
+    "深指": "sz399001",
+    "深证": "sz399001",
+    "深证成指": "sz399001",
+    "恒生科技": "hkHSTECH",
+    "恒生科技指数": "hkHSTECH",
+    "HSTECH": "hkHSTECH",
+    "HKHSTECH": "hkHSTECH",
+}
+
+_INDEX_HQ_CODES = frozenset({"sh000001", "sz399001", "hkHSTECH"})
+
+_WATCHLIST_TXT_NAME = "watchlist.local"
+
+DEFAULT_WATCHLIST: list[str] = [
+    "上证",
+    "深指",
+    "恒生科技",
+    "600519",
+    "00700.HK"
+]
+
+
+def load_watchlist_from_csv_file(path: Path) -> list[str] | None:
+    """
+    从文本文件读取逗号分隔代码；成功且至少有一条则返回列表，否则返回 None。
+    读文件失败（不存在、无权限等）返回 None。
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    flat = re.sub(r"[\r\n]+", ",", text)
+    out: list[str] = []
+    for part in flat.split(","):
+        s = part.strip()
+        if s and not s.startswith("#"):
+            out.append(s)
+    return out if out else None
+
+
+def load_watchlist_or_default(path: Path | None = None) -> tuple[list[str], str]:
+    """
+    优先从 `path` 读取；未指定则为脚本目录下的 watchlist.txt。
+    返回 (列表, 来源说明)。
+    """
+    p = (path or Path(__file__).resolve().parent / _WATCHLIST_TXT_NAME).resolve()
+    got = load_watchlist_from_csv_file(p)
+    if got is not None:
+        return got, str(p)
+    return list(DEFAULT_WATCHLIST), "内置默认 DEFAULT_WATCHLIST"
 
 
 def _normalize_sina_code(symbol: str) -> str:
     """
-    返回新浪 hq 代码：A 股 sh600519 / sz000001，港股 hk00700。
+    返回新浪 hq 代码：A 股 sh600519 / sz000001，港股 hk00700 / hkHSTECH，或主要指数别名。
     """
-    t = symbol.strip().upper().replace(" ", "")
-    if not t:
+    raw = symbol.strip()
+    if not raw:
         raise ValueError("股票代码为空")
+    if raw in _SINA_HQ_ALIASES:
+        return _SINA_HQ_ALIASES[raw]
+    t = raw.upper().replace(" ", "")
+    if t in _SINA_HQ_ALIASES:
+        return _SINA_HQ_ALIASES[t]
 
     m = re.fullmatch(r"HK(\d{1,5})", t)
     if m:
@@ -192,7 +257,7 @@ def fetch_sina_spot_batch(symbols: list[str], session: requests.Session | None =
     """
     按用户给定顺序返回行情字典列表。
 
-    symbols 示例：600519、000001.SZ、00700.HK、hk01810、1810（港股补零为 5 位）。
+    symbols 示例：600519、000001.SZ、00700.HK、上证、深指、恒生科技、HSTECH。
     """
     sina_list = [_normalize_sina_code(s) for s in symbols]
     sess = session or requests.Session()
@@ -235,7 +300,12 @@ def _fmt_cell(q: dict[str, Any]) -> str:
     price = q.get("price")
     pct = q.get("pct")
     code = q.get("code", "")
-    tag = "[H]" if q.get("market") == "HK" else ""
+    if code in _INDEX_HQ_CODES:
+        tag = "[指]"
+    elif q.get("market") == "HK":
+        tag = "[H]"
+    else:
+        tag = ""
     if price != price:  # NaN
         return f"{tag}{code} {name}".strip()
     return f"{tag}{code} {name} {price:.2f} {pct:+.2f}%"
@@ -249,24 +319,13 @@ def print_three_per_line(quotes: list[dict[str, Any]], sep: str = "  |  ") -> No
 
 
 if __name__ == "__main__":
-    watchlist = [
-        "600519",
-        "00700.HK",
-        "600036",
-        "01810",
-        "01952",
-        "000001.SZ",
-        "09988.HK",
-        "000905",
-        "600256",
-        "300377",
-        "601168",
-    ]
+    watchlist, watch_src = load_watchlist_or_default()
     sess = requests.Session()
     sess.headers.update(_SINA_HEADERS)
     print(
-        f"新浪实时（hq.sinajs.cn，A+H），每行 3 只：[H]=港股；"
-        f"每 {_POLL_INTERVAL_SEC // 60} 分钟刷新，Ctrl+C 结束\n",
+        f"新浪实时（hq.sinajs.cn，A+H+指数），每行 3 条：[指]=指数、[H]=港股；"
+        f"每 {_POLL_INTERVAL_SEC // 60} 分钟刷新，Ctrl+C 结束\n"
+        f"自选来源：{watch_src}，共 {len(watchlist)} 条\n",
         flush=True,
     )
     try:
