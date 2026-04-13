@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: stock-learning
+Version: 0.1.0
+Summary: 调用股票相关信息 查询并且监听
+Requires-Python: <3.14,>=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: akshare>=1.18.55
+Requires-Dist: pandas>=3.0.2
+Requires-Dist: pandas-ta>=0.4.71b0
+Requires-Dist: yfinance>=1.2.1
+Requires-Dist: requests>=2.28.0
+Provides-Extra: exe
+Requires-Dist: pyinstaller>=6.6; extra == "exe"
+Dynamic: license-file
+
+# stock_learning
+learn stock 
+UV uv 0.11.6
+Python 3.13

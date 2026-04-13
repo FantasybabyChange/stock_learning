@@ -1,1 +1,5 @@
 *.local
+
+# PyInstaller
+build/
+sina_batch_spot.spec

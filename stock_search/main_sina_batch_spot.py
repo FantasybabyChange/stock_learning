@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -78,12 +79,22 @@ def load_watchlist_from_csv_file(path: Path) -> list[str] | None:
     return out if out else None
 
 
+def _default_watchlist_base_dir() -> Path:
+    """
+    开发：包内 `stock_search/` 目录。
+    PyInstaller 单文件 exe：exe 所在目录（自选文件与 exe 放一起即可）。
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
 def load_watchlist_or_default(path: Path | None = None) -> tuple[list[str], str]:
     """
-    优先从 `path` 读取；未指定则为脚本目录下的 watchlist.txt。
+    优先从 `path` 读取；未指定则为默认目录下的自选文件（见 `_WATCHLIST_TXT_NAME`）。
     返回 (列表, 来源说明)。
     """
-    p = (path or Path(__file__).resolve().parent / _WATCHLIST_TXT_NAME).resolve()
+    p = (path or _default_watchlist_base_dir() / _WATCHLIST_TXT_NAME).resolve()
     got = load_watchlist_from_csv_file(p)
     if got is not None:
         return got, str(p)
@@ -318,7 +329,7 @@ def print_three_per_line(quotes: list[dict[str, Any]], sep: str = "  |  ") -> No
         print(sep.join(_fmt_cell(q) for q in chunk))
 
 
-if __name__ == "__main__":
+def main() -> None:
     watchlist, watch_src = load_watchlist_or_default()
     sess = requests.Session()
     sess.headers.update(_SINA_HEADERS)
@@ -337,3 +348,7 @@ if __name__ == "__main__":
             time.sleep(_POLL_INTERVAL_SEC)
     except KeyboardInterrupt:
         print("\n已停止轮询。", flush=True)
+
+
+if __name__ == "__main__":
+    main()

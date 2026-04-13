@@ -1,0 +1,2 @@
+[console_scripts]
+sina-batch-spot = stock_search.main_sina_batch_spot:main
