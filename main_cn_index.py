@@ -6,9 +6,13 @@ A 股主要大盘指数日线数据（AkShare）。
 
 实时行情：`stock_zh_index_spot_sina` 拉全市场指数快照后按新浪代码筛选（如上证指数 sh000001）。
 非交易时段一般为最近一笔行情或昨收附近，与行情软件「当前价」一致取决于数据源。
+
+个股：`stock_individual_info_em` 查询东财个股资料；行情可优先东财 `stock_zh_a_spot_em` 按代码筛选，
+失败则用新浪 `stock_zh_a_spot`（全市场分页，首次较慢，模块内缓存同进程复用）。
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import akshare as ak
@@ -35,6 +39,84 @@ CN_INDEX_EM: dict[str, str] = {
     "科创50": "000688",
     "上证50": "000016",
 }
+
+# 同进程内复用新浪 A 股全市场行情（`stock_zh_a_spot` 会分页拉全市场，避免重复请求）
+_spot_zh_a_sina_cache: pd.DataFrame | None = None
+
+
+def parse_a_share_symbol(symbol: str) -> tuple[str, str]:
+    """
+    解析 A 股输入，返回 (东财六位代码, 新浪代码)。
+
+    支持：600519、sh600519、SZ000001、600519.SH、000001.SZ 等。
+    未带交易所时按常见规则推断：600/601/603/605/688/689 等视为上证，其余默认深证。
+    """
+    t = symbol.strip().upper().replace(" ", "")
+    if not t:
+        raise ValueError("股票代码为空")
+
+    if re.fullmatch(r"(SH|SZ)\d{6}", t):
+        six = t[2:8]
+        return six, f"{t[:2].lower()}{six}"
+
+    m = re.fullmatch(r"(\d{6})\.(SH|SZ|SS)", t)
+    if m:
+        six, ex = m.group(1), m.group(2).replace("SS", "SH")
+        return six, f"{ex.lower()}{six}"
+
+    m = re.fullmatch(r"\d{6}", t)
+    if m:
+        six = m.group(0)
+        if six.startswith(("600", "601", "603", "605", "688", "689", "510", "511", "512", "513", "515", "516", "518", "560", "561", "562", "563", "588")):
+            return six, f"sh{six}"
+        return six, f"sz{six}"
+
+    raise ValueError(f"无法解析为 A 股代码: {symbol}")
+
+
+def fetch_stock_info_em(symbol: str) -> pd.DataFrame:
+    """东方财富个股资料，返回 item / value 两列。"""
+    em_code, _ = parse_a_share_symbol(symbol)
+    return ak.stock_individual_info_em(symbol=em_code)
+
+
+def _get_spot_zh_a_sina_full() -> pd.DataFrame:
+    global _spot_zh_a_sina_cache
+    if _spot_zh_a_sina_cache is None:
+        _spot_zh_a_sina_cache = ak.stock_zh_a_spot()
+    return _spot_zh_a_sina_cache
+
+
+def fetch_stock_spot_sina(symbol: str) -> pd.Series:
+    """新浪 A 股行情快照中的一行（全市场拉取 + 缓存）。"""
+    _, sina_code = parse_a_share_symbol(symbol)
+    df = _get_spot_zh_a_sina_full()
+    row = df.loc[df["代码"] == sina_code]
+    if row.empty:
+        raise ValueError(f"新浪行情中未找到股票: {sina_code}")
+    return row.iloc[0]
+
+
+def fetch_stock_spot_em(symbol: str) -> pd.Series:
+    """东财 A 股全表行情中筛选一行；需网络可达东财分页接口。"""
+    em_code, _ = parse_a_share_symbol(symbol)
+    df = ak.stock_zh_a_spot_em()
+    row = df.loc[df["代码"].astype(str) == em_code]
+    if row.empty:
+        raise ValueError(f"东财行情中未找到股票代码: {em_code}")
+    return row.iloc[0]
+
+
+def fetch_stock_spot(symbol: str, prefer_em: bool = True) -> pd.Series:
+    """
+    A 股实时/最新快照。默认先东财，失败再新浪（新浪首次会较慢）。
+    """
+    if prefer_em:
+        try:
+            return fetch_stock_spot_em(symbol)
+        except Exception:
+            pass
+    return fetch_stock_spot_sina(symbol)
 
 
 def _parse_yyyymmdd(s: str) -> pd.Timestamp:
@@ -177,3 +259,17 @@ if __name__ == "__main__":
     print("\n=== 上证指数 实时快照（新浪 sh000001）===")
     spot = shanghai_index_spot_realtime(prefer_em=False)
     print(spot.to_string())
+
+    print("\n=== 个股示例：600256 资料（东财）===")
+    try:
+        info = fetch_stock_info_em("600519")
+        print(info.to_string(index=False))
+    except Exception as e:
+        print(f"个股资料拉取失败: {e}")
+
+    print("\n=== 个股示例：600256 行情（优先东财，失败则新浪）===")
+    try:
+        q = fetch_stock_spot("600256", prefer_em=True)
+        print(q.to_string())
+    except Exception as e:
+        print(f"行情拉取失败: {e}")
