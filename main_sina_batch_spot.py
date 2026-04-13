@@ -4,13 +4,15 @@
 - A 股：sh/sz + 6 位，如 sh600519、sz000001
 - 港股：hk + 5 位，如 hk00700（腾讯）；支持 00700.HK、hk00700、1810、01810 等写法
 
-控制台输出：每行 3 只股票。
+控制台输出：每行 3 只股票。直接运行本文件时默认每 3 分钟拉取一轮（`_POLL_INTERVAL_SEC`）。
 
 依赖：requests（随 akshare 环境一般已有）。
 """
 from __future__ import annotations
 
 import re
+import time
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -23,6 +25,7 @@ _SINA_HEADERS = {
     "User-Agent": _DEFAULT_UA,
     "Referer": "https://finance.sina.com.cn/",
 }
+_POLL_INTERVAL_SEC = 180
 _BATCH_SIZE = 40
 _LINE_RE = re.compile(r'var hq_str_((?:sh|sz)\d{6}|hk\d{5})="([^"]*)"')
 
@@ -248,8 +251,30 @@ def print_three_per_line(quotes: list[dict[str, Any]], sep: str = "  |  ") -> No
 if __name__ == "__main__":
     watchlist = [
         "600519",
-        "00700.HK"
+        "00700.HK",
+        "600036",
+        "01810",
+        "01952",
+        "000001.SZ",
+        "09988.HK",
+        "000905",
+        "600256",
+        "300377",
+        "601168",
     ]
-    rows = fetch_sina_spot_batch(watchlist)
-    print("新浪实时（hq.sinajs.cn，A+H），每行 3 只：[H]=港股\n")
-    print_three_per_line(rows)
+    sess = requests.Session()
+    sess.headers.update(_SINA_HEADERS)
+    print(
+        f"新浪实时（hq.sinajs.cn，A+H），每行 3 只：[H]=港股；"
+        f"每 {_POLL_INTERVAL_SEC // 60} 分钟刷新，Ctrl+C 结束\n",
+        flush=True,
+    )
+    try:
+        while True:
+            print(f"--- {datetime.now():%Y-%m-%d %H:%M:%S} ---", flush=True)
+            rows = fetch_sina_spot_batch(watchlist, session=sess)
+            print_three_per_line(rows)
+            print(flush=True)
+            time.sleep(_POLL_INTERVAL_SEC)
+    except KeyboardInterrupt:
+        print("\n已停止轮询。", flush=True)
