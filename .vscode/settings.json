@@ -3,5 +3,7 @@
   "python.terminal.activateEnvironment": true,
   "python.analysis.typeCheckingMode": "basic",
   "python.languageServer": "Default",
-  "cursorpyright.analysis.typeCheckingMode": "basic"
+  "cursorpyright.analysis.typeCheckingMode": "basic",
+  "markdown.extension.completion.enabled": false,
+  "markdown.extension.tableFormatter.enabled": false
 }
