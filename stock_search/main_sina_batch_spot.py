@@ -282,10 +282,10 @@ def _fmt_cell(q: dict[str, Any]) -> str:
         color = "⚪"
         pct_str = "--.--%"
     elif pct > 0:
-        color = "🔴"   # 红色 = 涨
+        color = "🔵"   # 红色 = 涨
         pct_str = f"+{pct:.2f}%"
     elif pct < 0:
-        color = "🟢"   # 绿色 = 跌
+        color = "🟫"   # 绿色 = 跌
         pct_str = f"{pct:.2f}%"
     else:
         color = "⚪"
@@ -307,7 +307,7 @@ def main() -> None:
     sess = requests.Session()
     sess.headers.update(_SINA_HEADERS)
     print(
-        f"新浪实时行情（🔴涨 🟢跌） | 每 {_POLL_INTERVAL_SEC // 60} 分钟刷新\n"
+        f"新浪实时行情（🔵涨 🟫跌） | 每 {_POLL_INTERVAL_SEC // 60} 分钟刷新\n"
         f"自选来源：{watch_src}，共 {len(watchlist)} 条\n",
         flush=True,
     )
@@ -315,11 +315,36 @@ def main() -> None:
         while True:
             print(f"--- {datetime.now():%Y-%m-%d %H:%M:%S} ---", flush=True)
             rows = fetch_sina_spot_batch(watchlist, session=sess)
-            print_three_per_line(rows)
+            
+            # 对数据进行排序：指数放在最前面，其他按涨幅降序排列
+            sorted_rows = sort_quotes_by_index_and_change(rows)
+            
+            print_three_per_line(sorted_rows)
             print(flush=True)
             time.sleep(_POLL_INTERVAL_SEC)
     except KeyboardInterrupt:
         print("\n已停止轮询。", flush=True)
+
+
+def sort_quotes_by_index_and_change(quotes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """对股票数据进行排序：指数放在最前面，其他按涨幅降序排列"""
+    # 分离指数和非指数
+    indices = []
+    others = []
+    
+    for quote in quotes:
+        code = quote.get("code", "")
+        # 判断是否为指数
+        if code in _INDEX_HQ_CODES:
+            indices.append(quote)
+        else:
+            others.append(quote)
+    
+    # 对非指数股票按涨幅排序（降序）
+    others.sort(key=lambda x: x.get("pct", 0) or 0, reverse=True)
+    
+    # 合并结果：指数在前，其他股票按涨幅排序在后
+    return indices + others
 
 
 if __name__ == "__main__":
