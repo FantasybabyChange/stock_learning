@@ -2,4 +2,5 @@
 
 # PyInstaller
 build/
+dist/
 sina_batch_spot.spec
