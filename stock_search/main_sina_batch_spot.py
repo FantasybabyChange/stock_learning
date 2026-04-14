@@ -258,18 +258,12 @@ def fetch_sina_spot_batch(symbols: list[str], session: requests.Session | None =
         url = "https://hq.sinajs.cn/list=" + ",".join(chunk)
         r = sess.get(url, timeout=20)
         r.encoding = "gbk"
-        # 添加调试信息，查看返回的数据
-        if "899050" in "".join(chunk):
-            print(f"DEBUG: 请求北证指数的URL: {url}")
-            print(f"DEBUG: 返回文本前200字符: {r.text[:200]}")
         for line in r.text.splitlines():
             m = _LINE_RE.search(line)
             if not m:
                 continue
             code, inner = m.group(1), m.group(2)
             # 添加调试信息，查看是否有北证指数的数据
-            if code == "bj899050":
-                print(f"DEBUG: 找到北证指数数据，inner={inner[:100]}...")
             by_code[code] = _parse_hq_inner(code, inner)
 
     out: list[dict[str, Any]] = []
