@@ -28,7 +28,7 @@ _US_FIRST_AT_NIGHT = True
 _BATCH_SIZE = 40
 
 _LINE_RE = re.compile(
-    r'var hq_str_((?:sh|sz)\d{6}|hk\d{5}|hk[A-Z][A-Z0-9]*|(?:gb|usr)_[a-z0-9._-]+)="([^"]*)"'
+    r'var hq_str_((?:sh|sz|bj)\d{6}|hk\d{5}|hk[A-Z][A-Z0-9]*|(?:gb|usr)_[a-z0-9._-]+)="([^"]*)"'
 )
 
 _SINA_HQ_ALIASES: dict[str, str] = {
@@ -37,13 +37,21 @@ _SINA_HQ_ALIASES: dict[str, str] = {
     "深指": "sz399001",
     "深证": "sz399001",
     "深证成指": "sz399001",
+    "北证": "bj899050",
+    "北证50": "bj899050",
+    "北证指数": "bj899050",
+    "北证50指数": "bj899050",
+    "恒生": "hkHSI",
+    "恒生指数": "hkHSI",
+    "HSI": "hkHSI",
+    "HKHSI": "hkHSI",
     "恒生科技": "hkHSTECH",
     "恒生科技指数": "hkHSTECH",
     "HSTECH": "hkHSTECH",
     "HKHSTECH": "hkHSTECH",
 }
 
-_INDEX_HQ_CODES = frozenset({"sh000001", "sz399001", "hkHSTECH"})
+_INDEX_HQ_CODES = frozenset({"sh000001", "sz399001", "bj899050", "hkHSI", "hkHSTECH"})
 _US_EASTERN_TZ = ZoneInfo("America/New_York")
 _YAHOO_QUOTE_API = "https://query1.finance.yahoo.com/v7/finance/quote"
 _YAHOO_QUOTE_API_FALLBACK = "https://query2.finance.yahoo.com/v7/finance/quote"
@@ -53,6 +61,7 @@ _WATCHLIST_TXT_NAME = "watchlist.local"
 DEFAULT_WATCHLIST: list[str] = [
     "上证",
     "深指",
+    "北证",
     "恒生科技",
     "600519",
     "00700.HK",
@@ -123,6 +132,10 @@ def _normalize_sina_code(symbol: str) -> str:
     m = re.fullmatch(r"\d{6}", t)
     if m:
         six = m.group(0)
+        # 北证指数（899开头）
+        if six.startswith("899"):
+            return f"bj{six}"
+        # 上交所股票
         if six.startswith(("600","601","603","605","688","689","510","511","512","513","515","516","518","560","561","562","563","588")):
             return f"sh{six}"
         return f"sz{six}"
@@ -245,11 +258,18 @@ def fetch_sina_spot_batch(symbols: list[str], session: requests.Session | None =
         url = "https://hq.sinajs.cn/list=" + ",".join(chunk)
         r = sess.get(url, timeout=20)
         r.encoding = "gbk"
+        # 添加调试信息，查看返回的数据
+        if "899050" in "".join(chunk):
+            print(f"DEBUG: 请求北证指数的URL: {url}")
+            print(f"DEBUG: 返回文本前200字符: {r.text[:200]}")
         for line in r.text.splitlines():
             m = _LINE_RE.search(line)
             if not m:
                 continue
             code, inner = m.group(1), m.group(2)
+            # 添加调试信息，查看是否有北证指数的数据
+            if code == "bj899050":
+                print(f"DEBUG: 找到北证指数数据，inner={inner[:100]}...")
             by_code[code] = _parse_hq_inner(code, inner)
 
     out: list[dict[str, Any]] = []
@@ -257,6 +277,10 @@ def fetch_sina_spot_batch(symbols: list[str], session: requests.Session | None =
         if c in by_code:
             out.append(by_code[c])
         else:
+            # 添加调试信息
+            if c == "bj899050":
+                print(f"DEBUG: 未找到北证指数数据，sina_code={c}")
+                print(f"DEBUG: 返回的keys: {list(by_code.keys())}")
             out.append({"code": c, "name": "(未返回)", "price": float("nan"), "pct": float("nan")})
     return out
 
