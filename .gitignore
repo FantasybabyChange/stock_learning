@@ -3,6 +3,10 @@ __pycache__/
 **/__pycache__/
 *.py[cod]
 
+# VSCode
+.vscode/settings.json
+.vscode/launch.json
+
 # PyInstaller
 build/
 dist/

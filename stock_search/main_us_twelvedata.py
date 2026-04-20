@@ -2,8 +2,9 @@
 US stock/ETF quote fetcher based on Twelve Data.
 
 This module focuses on two use cases:
-1. Fetch the latest TSLA-like quote, optionally including extended hours.
-2. Fetch 1-minute time series data with `prepost=true` for full-session prices.
+1. Fetch the latest TSLA-like quote, including current extended-hours fields.
+2. Fetch 1-minute time series data with `prepost=true` and display separate
+   premarket plus night/post-market bars.
 
 Required local files:
 - `tweleve_api_key.local`
@@ -11,6 +12,7 @@ Required local files:
 
 Notes from Twelve Data official support/docs:
 - `prepost=true` is supported on `/quote`, `/price`, `/time_series`, `/eod`
+- For `/quote`, extended-hours data requires minute-level intervals
 - U.S. real-time extended hours are available on Pro plan or higher
 - Historical extended hours older than one day are available
 """
@@ -20,19 +22,24 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 
 TWELVE_DATA_BASE_URL = "https://api.twelvedata.com"
 DEFAULT_TIMEOUT = 20
 DEFAULT_EXCHANGE = "NASDAQ"
+DEFAULT_INTERVAL = "1min"
+DEFAULT_TIMEZONE = "America/New_York"
+FULL_EXTENDED_SESSION_OUTPUTSIZE = 960
 API_KEY_FILE_NAME = "tweleve_api_key.local"
 WATCHLIST_FILE_NAME = "watchlist_us.local"
 US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9._-]{0,14}$")
+US_EASTERN_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 
 
 def normalize_us_symbol(symbol: str) -> str:
@@ -61,6 +68,99 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and value == value
+
+
+def _format_number(value: Any, digits: int = 2) -> str:
+    number = _safe_float(value)
+    return f"{number:.{digits}f}" if number == number else "--"
+
+
+def _format_pct(value: Any) -> str:
+    pct = _safe_float(value)
+    if pct != pct:
+        return "--.--%"
+    return f"{pct:+.2f}%"
+
+
+def _parse_exchange_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            return parsed.replace(tzinfo=US_EASTERN_TZ)
+        except ValueError:
+            pass
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=US_EASTERN_TZ)
+    return parsed.astimezone(US_EASTERN_TZ)
+
+
+def _parse_unix_timestamp(value: Any) -> datetime | None:
+    try:
+        timestamp = int(value)
+    except (TypeError, ValueError):
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(US_EASTERN_TZ)
+
+
+def _format_et_datetime(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(US_EASTERN_TZ).strftime("%Y-%m-%d %H:%M:%S ET")
+
+
+def _us_market_session_label(value: datetime | None) -> str:
+    if value is None:
+        return "UNKNOWN"
+
+    local_dt = value.astimezone(US_EASTERN_TZ)
+    if local_dt.weekday() >= 5:
+        return "CLOSED"
+
+    minutes = local_dt.hour * 60 + local_dt.minute
+    if 4 * 60 <= minutes < 9 * 60 + 30:
+        return "PRE"
+    if 9 * 60 + 30 <= minutes < 16 * 60:
+        return "REG"
+    if 16 * 60 <= minutes < 20 * 60:
+        return "POST"
+    return "CLOSED"
+
+
+def _first_number(*values: Any) -> float:
+    for value in values:
+        number = _safe_float(value)
+        if number == number:
+            return number
+    return float("nan")
+
+
+def _latest_bar_by_session(series: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for bar in series.get("values", []) or []:
+        bar_dt = _parse_exchange_datetime(bar.get("datetime"))
+        session = _us_market_session_label(bar_dt)
+        if session in {"PRE", "REG", "POST"} and session not in out:
+            session_bar = dict(bar)
+            session_bar["_session"] = session
+            session_bar["_datetime_et"] = _format_et_datetime(bar_dt)
+            out[session] = session_bar
+        if {"PRE", "REG", "POST"}.issubset(out):
+            break
+    return out
 
 
 def _default_base_dir() -> Path:
@@ -148,13 +248,17 @@ class TwelveDataClient:
         self,
         symbol: str,
         exchange: str = DEFAULT_EXCHANGE,
+        interval: str = DEFAULT_INTERVAL,
         prepost: bool = True,
+        timezone_name: str = DEFAULT_TIMEZONE,
     ) -> dict[str, Any]:
         return self._request(
             "quote",
             symbol=normalize_us_symbol(symbol),
             exchange=exchange,
+            interval=interval,
             prepost=str(prepost).lower(),
+            timezone=timezone_name,
         )
 
     def get_price(
@@ -173,12 +277,13 @@ class TwelveDataClient:
     def get_time_series(
         self,
         symbol: str,
-        interval: str = "1min",
+        interval: str = DEFAULT_INTERVAL,
         exchange: str = DEFAULT_EXCHANGE,
         outputsize: int = 30,
         prepost: bool = True,
         start_date: str | None = None,
         end_date: str | None = None,
+        timezone_name: str = DEFAULT_TIMEZONE,
     ) -> dict[str, Any]:
         return self._request(
             "time_series",
@@ -189,6 +294,7 @@ class TwelveDataClient:
             prepost=str(prepost).lower(),
             start_date=start_date,
             end_date=end_date,
+            timezone=timezone_name,
         )
 
 
@@ -218,7 +324,7 @@ def fetch_us_quote_with_fallback(
 def fetch_us_intraday_series_with_fallback(
     symbol: str = "TSLA",
     exchange: str = DEFAULT_EXCHANGE,
-    interval: str = "1min",
+    interval: str = DEFAULT_INTERVAL,
     outputsize: int = 10,
     client: TwelveDataClient | None = None,
 ) -> dict[str, Any]:
@@ -257,6 +363,10 @@ def summarize_quote(data: dict[str, Any]) -> str:
     close = _safe_float(data.get("close"))
     change = _safe_float(data.get("change"))
     percent_change = _safe_float(data.get("percent_change"))
+    extended_price = _safe_float(data.get("extended_price"))
+    extended_change = _safe_float(data.get("extended_change"))
+    extended_pct = _safe_float(data.get("extended_percent_change"))
+    extended_dt = _parse_unix_timestamp(data.get("extended_timestamp"))
     dt = data.get("datetime", "")
     extended = data.get("is_extended_hours")
     requested_prepost = data.get("_requested_prepost")
@@ -264,9 +374,14 @@ def summarize_quote(data: dict[str, Any]) -> str:
     close_text = f"{close:.4f}" if close == close else "nan"
     change_text = f"{change:+.4f}" if change == change else "nan"
     pct_text = f"{percent_change:+.2f}%" if percent_change == percent_change else "nan"
+    extended_text = f"{extended_price:.4f}" if extended_price == extended_price else "nan"
+    extended_change_text = f"{extended_change:+.4f}" if extended_change == extended_change else "nan"
+    extended_pct_text = f"{extended_pct:+.2f}%" if extended_pct == extended_pct else "nan"
     return (
         f"{symbol} {name} | price={close_text} | change={change_text} | "
         f"pct={pct_text} | datetime={dt} | "
+        f"extended={extended_text} {extended_change_text} {extended_pct_text} "
+        f"at={_format_et_datetime(extended_dt)} | "
         f"prepost_requested={requested_prepost} | is_extended_hours={extended}"
     )
 
@@ -290,23 +405,47 @@ def build_spot_row(
     quote: dict[str, Any],
     series: dict[str, Any],
 ) -> dict[str, Any]:
+    bars_by_session = _latest_bar_by_session(series)
     latest_bar = (series.get("values") or [{}])[0]
-    latest_price = _safe_float(latest_bar.get("close"))
-    if latest_price != latest_price:
-        latest_price = _safe_float(quote.get("close"))
+    latest_bar_dt = _parse_exchange_datetime(latest_bar.get("datetime"))
+    extended_dt = _parse_unix_timestamp(quote.get("extended_timestamp")) or latest_bar_dt
 
-    pct = _safe_float(quote.get("percent_change"))
+    regular_price = _safe_float(quote.get("close"))
+    extended_price = _safe_float(quote.get("extended_price"))
+    latest_price = _first_number(extended_price, latest_bar.get("close"), regular_price)
+
+    regular_pct = _safe_float(quote.get("percent_change"))
+    extended_pct = _safe_float(quote.get("extended_percent_change"))
+    pct = _first_number(extended_pct, regular_pct)
     name = quote.get("name") or symbol
+    current_session = _us_market_session_label(extended_dt)
+    if current_session == "CLOSED" and _is_number(extended_price):
+        current_session = "EXT"
     row = {
         "code": normalize_us_symbol(symbol),
         "name": name,
         "price": latest_price,
         "pct": pct,
+        "regular_price": regular_price,
+        "regular_pct": regular_pct,
+        "extended_price": extended_price,
+        "extended_change": _safe_float(quote.get("extended_change")),
+        "extended_pct": extended_pct,
+        "extended_time": _format_et_datetime(extended_dt),
+        "session": current_session,
         "market": "US",
         "bar_time": latest_bar.get("datetime", ""),
         "bar_volume": _safe_int(latest_bar.get("volume")),
         "interval": (series.get("meta") or {}).get("interval", ""),
         "prepost_requested": series.get("_requested_prepost"),
+        "pre_price": _safe_float((bars_by_session.get("PRE") or {}).get("close")),
+        "pre_time": (bars_by_session.get("PRE") or {}).get("_datetime_et", ""),
+        "pre_volume": _safe_int((bars_by_session.get("PRE") or {}).get("volume")),
+        "post_price": _safe_float((bars_by_session.get("POST") or {}).get("close")),
+        "post_time": (bars_by_session.get("POST") or {}).get("_datetime_et", ""),
+        "post_volume": _safe_int((bars_by_session.get("POST") or {}).get("volume")),
+        "regular_bar_price": _safe_float((bars_by_session.get("REG") or {}).get("close")),
+        "regular_bar_time": (bars_by_session.get("REG") or {}).get("_datetime_et", ""),
         "warning": series.get("_warning", ""),
     }
     return row
@@ -315,7 +454,11 @@ def build_spot_row(
 def fetch_us_spot_row(symbol: str, client: TwelveDataClient | None = None) -> dict[str, Any]:
     api = client or TwelveDataClient()
     quote = fetch_us_quote_with_fallback(symbol=symbol, client=api)
-    series = fetch_us_intraday_series_with_fallback(symbol=symbol, outputsize=1, client=api)
+    series = fetch_us_intraday_series_with_fallback(
+        symbol=symbol,
+        outputsize=FULL_EXTENDED_SESSION_OUTPUTSIZE,
+        client=api,
+    )
     return build_spot_row(symbol, quote, series)
 
 
@@ -336,7 +479,8 @@ def _fmt_cell(row: dict[str, Any]) -> str:
     pct = row.get("pct")
     code = row.get("code", "")
 
-    tag = "[U]"
+    session = row.get("session") or "U"
+    tag = f"[{session}]"
 
     if pct is None or pct != pct:
         color = "·"
@@ -351,7 +495,7 @@ def _fmt_cell(row: dict[str, Any]) -> str:
         color = "EQ"
         pct_str = "0.00%"
 
-    price_str = f"{price:.2f}" if price == price else "--.--"
+    price_str = _format_number(price, 2)
     return f"{tag} {code:8} {name:12} {price_str:8} {color} {pct_str}"
 
 
@@ -372,6 +516,30 @@ def print_row_details(rows: list[dict[str, Any]]) -> None:
             f"    intraday: {interval} latest={bar_time} volume={volume_text} "
             f"prepost={prepost_text}"
         )
+        print(
+            "    regular: "
+            f"price={_format_number(row.get('regular_price'), 2)} "
+            f"pct={_format_pct(row.get('regular_pct'))}"
+        )
+        print(
+            "    premarket: "
+            f"price={_format_number(row.get('pre_price'), 2)} "
+            f"time={row.get('pre_time') or '--'} "
+            f"volume={row.get('pre_volume') if row.get('pre_volume') is not None else '--'}"
+        )
+        print(
+            "    night/post: "
+            f"price={_format_number(row.get('post_price'), 2)} "
+            f"time={row.get('post_time') or '--'} "
+            f"volume={row.get('post_volume') if row.get('post_volume') is not None else '--'}"
+        )
+        if _is_number(row.get("extended_price")):
+            print(
+                "    quote extended: "
+                f"price={_format_number(row.get('extended_price'), 2)} "
+                f"pct={_format_pct(row.get('extended_pct'))} "
+                f"time={row.get('extended_time') or '--'}"
+            )
         if row.get("warning"):
             print(f"    note: {row['warning']}")
 
@@ -381,10 +549,10 @@ def main() -> None:
     client = TwelveDataClient(credentials=credentials)
     watchlist, watchlist_source = load_watchlist_from_csv_file()
     print(
-        "Twelve Data US intraday spot "
+        "Twelve Data US intraday spot with premarket/night-post "
         f"| fetched_at={datetime.now():%Y-%m-%d %H:%M:%S}\n"
         f"api_key_source={credentials.source} | watchlist_source={watchlist_source} | "
-        f"symbols={len(watchlist)}"
+        f"symbols={len(watchlist)} | interval={DEFAULT_INTERVAL} | prepost=true"
     )
     rows = fetch_us_spot_rows(watchlist, client=client)
     print_rows(rows)
